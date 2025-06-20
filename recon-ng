@@ -1,58 +1,416 @@
 #!/usr/bin/env python3
+"""
+Recon Framework - Command Line Interface
+Haupteinstiegspunkt für das Reconnaissance Framework
+"""
 
 import argparse
+import os
 import re
 import sys
-# prevent creation of compiled bytecode files
+import logging
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+
+# Prevent creation of compiled bytecode files
 sys.dont_write_bytecode = True
-from recon.core import base
-from recon.core.framework import Colors
 
-def recon_ui(args):
-    # set up command completion
-    try:
-        import readline
-    except ImportError:
-        print(f"{Colors.R}[!] Module 'readline' not available. Tab complete disabled.{Colors.N}")
-    else:
-        import rlcompleter
-        if 'libedit' in readline.__doc__:
-            readline.parse_and_bind('bind ^I rl_complete')
-        else:
-            readline.parse_and_bind('tab: complete')
-        readline.set_completer_delims(re.sub('[/-]', '', readline.get_completer_delims()))
-        # for possible future use to format command completion output
-        #readline.set_completion_display_matches_hook(display_hook)
-    # process toggle flag arguments
-    flags = {
-        'check': args.check if not args.stealth else False,
-        'analytics': args.analytics if not args.stealth else False,
-        'marketplace': args.marketplace if not args.stealth else False,
-        'accessible' : args.accessible
-    }
-    # instantiate framework
-    x = base.Recon(**flags)
-    # check for and run script session
-    if args.script_file:
-        x._do_script_execute(args.script_file)
-    # launch the interactive session
-    options = [base.Mode.CONSOLE]
-    if args.workspace:
-        options.append(args.workspace)
-    try:
-        x.start(*options)
-    except KeyboardInterrupt:
-        print('')
+# Import framework components
+try:
+    from recon.core import base
+    from recon.core.framework import Colors
+except ImportError as e:
+    print(f"[!] Import error: {e}")
+    print("[!] Make sure the recon framework is properly installed.")
+    sys.exit(1)
 
-description = f"%(prog)s - {base.__author__}"
-parser = argparse.ArgumentParser(description=description)
-parser.add_argument('-w', help='load/create a workspace', metavar='workspace', dest='workspace', action='store')
-parser.add_argument('-r', help='load commands from a resource file', metavar='filename', dest='script_file', action='store')
-parser.add_argument('--no-version', help='disable version check', dest='check', default=True, action='store_false')
-parser.add_argument('--no-analytics', help='disable analytics reporting', dest='analytics', default=True, action='store_false')
-parser.add_argument('--no-marketplace', help='disable remote module management', dest='marketplace', default=True, action='store_false')
-parser.add_argument('--stealth', help='disable all passive requests (--no-*)', dest='stealth', default=False, action='store_true')
-parser.add_argument('--accessible', help='Use accessible outputs when available', dest='accessible', default=False, action='store_true')
-parser.add_argument('--version', help='displays the current version', action='version', version=base.__version__)
-args = parser.parse_args()
-recon_ui(args)
+
+class ReconCLI:
+    """
+    Command Line Interface für das Recon Framework.
+    Verwaltet Argument-Parsing, Setup und Framework-Initialisierung.
+    """
+
+    def __init__(self):
+        self.logger = self._setup_logging()
+        self.parser = self._create_argument_parser()
+
+    def _setup_logging(self) -> logging.Logger:
+        """Konfiguriert Logging für die CLI."""
+        logger = logging.getLogger('recon-cli')
+
+        # Logging-Level basierend auf Umgebungsvariable
+        log_level = os.getenv('RECON_LOG_LEVEL', 'WARNING').upper()
+        logger.setLevel(getattr(logging, log_level, logging.WARNING))
+
+        # Handler nur hinzufügen wenn noch keiner existiert
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
+        return logger
+
+    def _setup_readline(self) -> bool:
+        """
+        Konfiguriert Tab-Completion mit readline.
+
+        Returns:
+            bool: True wenn readline erfolgreich konfiguriert, False sonst
+        """
+        try:
+            import readline
+            import rlcompleter
+
+            # Plattform-spezifische Konfiguration
+            if 'libedit' in readline.__doc__:
+                readline.parse_and_bind('bind ^I rl_complete')
+            else:
+                readline.parse_and_bind('tab: complete')
+
+            # Delimiters anpassen für bessere Completion
+            current_delims = readline.get_completer_delims()
+            new_delims = re.sub('[/-]', '', current_delims)
+            readline.set_completer_delims(new_delims)
+
+            # History-Datei konfigurieren
+            self._setup_history_file()
+
+            self.logger.debug("Readline erfolgreich konfiguriert")
+            return True
+
+        except ImportError:
+            print(f"{Colors.R}[!] Module 'readline' not available. "
+                  f"Tab complete disabled.{Colors.N}")
+            self.logger.warning("Readline nicht verfügbar")
+            return False
+
+    def _setup_history_file(self) -> None:
+        """Konfiguriert Readline-History-Datei."""
+        try:
+            import readline
+
+            # History-Datei im Home-Verzeichnis oder tmp
+            history_file = Path.home() / '.recon_history'
+            if not history_file.parent.exists():
+                history_file = Path('/tmp') / '.recon_history'
+
+            # History laden falls vorhanden
+            if history_file.exists():
+                readline.read_history_file(str(history_file))
+
+            # History beim Exit speichern
+            import atexit
+            atexit.register(readline.write_history_file, str(history_file))
+
+            # Maximale History-Größe
+            readline.set_history_length(1000)
+
+            self.logger.debug(f"History-Datei konfiguriert: {history_file}")
+
+        except Exception as e:
+            self.logger.debug(f"Fehler bei History-Setup: {e}")
+
+    def _create_argument_parser(self) -> argparse.ArgumentParser:
+        """Erstellt und konfiguriert den Argument-Parser."""
+        description = f"%(prog)s - {base.__author__}"
+
+        parser = argparse.ArgumentParser(
+            description=description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=self._get_epilog_text()
+        )
+
+        # Workspace-Optionen
+        workspace_group = parser.add_argument_group('Workspace Options')
+        workspace_group.add_argument(
+            '-w', '--workspace',
+            help='load/create a workspace',
+            metavar='WORKSPACE',
+            dest='workspace',
+            action='store'
+        )
+
+        # Script-Optionen
+        script_group = parser.add_argument_group('Script Options')
+        script_group.add_argument(
+            '-r', '--resource',
+            help='load commands from a resource file',
+            metavar='FILENAME',
+            dest='script_file',
+            action='store',
+            type=self._validate_script_file
+        )
+
+        # Feature-Toggle-Optionen
+        feature_group = parser.add_argument_group('Feature Options')
+        feature_group.add_argument(
+            '--no-version',
+            help='disable version check',
+            dest='check',
+            default=True,
+            action='store_false'
+        )
+        feature_group.add_argument(
+            '--no-analytics',
+            help='disable analytics reporting',
+            dest='analytics',
+            default=True,
+            action='store_false'
+        )
+        feature_group.add_argument(
+            '--no-marketplace',
+            help='disable remote module management',
+            dest='marketplace',
+            default=True,
+            action='store_false'
+        )
+        feature_group.add_argument(
+            '--stealth',
+            help='disable all passive requests (implies --no-*)',
+            dest='stealth',
+            default=False,
+            action='store_true'
+        )
+
+        # Accessibility-Optionen
+        ui_group = parser.add_argument_group('UI Options')
+        ui_group.add_argument(
+            '--accessible',
+            help='use accessible outputs when available',
+            dest='accessible',
+            default=False,
+            action='store_true'
+        )
+        ui_group.add_argument(
+            '--no-colors',
+            help='disable colored output',
+            dest='colors',
+            default=True,
+            action='store_false'
+        )
+
+        # Debug-Optionen
+        debug_group = parser.add_argument_group('Debug Options')
+        debug_group.add_argument(
+            '--debug',
+            help='enable debug output',
+            dest='debug',
+            default=False,
+            action='store_true'
+        )
+        debug_group.add_argument(
+            '--log-file',
+            help='write logs to file',
+            metavar='LOGFILE',
+            dest='log_file',
+            action='store'
+        )
+
+        # Version
+        parser.add_argument(
+            '--version',
+            help='displays the current version',
+            action='version',
+            version=f'%(prog)s {base.__version__}'
+        )
+
+        return parser
+
+    def _get_epilog_text(self) -> str:
+        """Gibt Epilog-Text für die Hilfe zurück."""
+        return """
+Examples:
+  %(prog)s                           # Start interactive session
+  %(prog)s -w myproject              # Load/create workspace 'myproject'
+  %(prog)s -r commands.txt           # Execute commands from file
+  %(prog)s --stealth                 # Run in stealth mode
+  %(prog)s --debug --log-file debug.log  # Debug mode with logging
+
+Environment Variables:
+  RECON_LOG_LEVEL    Set logging level (DEBUG, INFO, WARNING, ERROR)
+  RECON_CONFIG_DIR   Custom configuration directory
+        """
+
+    def _validate_script_file(self, filepath: str) -> str:
+        """
+        Validiert Script-Datei-Pfad.
+
+        Args:
+            filepath: Pfad zur Script-Datei
+
+        Returns:
+            str: Validierter Dateipfad
+
+        Raises:
+            argparse.ArgumentTypeError: Bei ungültiger Datei
+        """
+        path = Path(filepath)
+
+        if not path.exists():
+            raise argparse.ArgumentTypeError(f"Script file '{filepath}' does not exist")
+
+        if not path.is_file():
+            raise argparse.ArgumentTypeError(f"'{filepath}' is not a file")
+
+        if not path.stat().st_size:
+            raise argparse.ArgumentTypeError(f"Script file '{filepath}' is empty")
+
+        return str(path.resolve())
+
+    def _process_flags(self, args: argparse.Namespace) -> Dict[str, Any]:
+        """
+        Verarbeitet Command-Line-Flags zu Framework-Optionen.
+
+        Args:
+            args: Geparste Command-Line-Argumente
+
+        Returns:
+            Dict: Framework-Konfiguration
+        """
+        # Stealth-Modus überschreibt andere Optionen
+        if args.stealth:
+            return {
+                'check': False,
+                'analytics': False,
+                'marketplace': False,
+                'accessible': args.accessible,
+                'colors': args.colors,
+                'debug': args.debug
+            }
+
+        return {
+            'check': args.check,
+            'analytics': args.analytics,
+            'marketplace': args.marketplace,
+            'accessible': args.accessible,
+            'colors': args.colors,
+            'debug': args.debug
+        }
+
+    def _setup_debug_logging(self, args: argparse.Namespace) -> None:
+        """Konfiguriert Debug-Logging basierend auf Argumenten."""
+        if args.debug:
+            self.logger.setLevel(logging.DEBUG)
+
+            # Log-Datei konfigurieren falls angegeben
+            if args.log_file:
+                file_handler = logging.FileHandler(args.log_file)
+                file_formatter = logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+                )
+                file_handler.setFormatter(file_formatter)
+                self.logger.addHandler(file_handler)
+
+                print(f"[*] Debug logging enabled. Writing to: {args.log_file}")
+
+    def _validate_environment(self) -> bool:
+        """
+        Validiert die Umgebung vor dem Start.
+
+        Returns:
+            bool: True wenn Umgebung gültig, False sonst
+        """
+        try:
+            # Framework-Module testen
+            _ = base.Recon
+
+            # Python-Version prüfen
+            if sys.version_info < (3, 6):
+                print(f"{Colors.R}[!] Python 3.6+ required. "
+                      f"Current version: {sys.version}{Colors.N}")
+                return False
+
+            # Berechtigunte prüfen (falls erforderlich)
+            if hasattr(base, 'REQUIRES_ADMIN') and base.REQUIRES_ADMIN:
+                if os.geteuid() != 0:
+                    print(f"{Colors.R}[!] This tool requires administrative privileges{Colors.N}")
+                    return False
+
+            return True
+
+        except Exception as e:
+            print(f"{Colors.R}[!] Environment validation failed: {e}{Colors.N}")
+            return False
+
+    def run_framework(self, args: argparse.Namespace) -> int:
+        """
+        Startet das Recon-Framework mit den gegebenen Argumenten.
+
+        Args:
+            args: Geparste Command-Line-Argumente
+
+        Returns:
+            int: Exit-Code (0 = Erfolg, != 0 = Fehler)
+        """
+        try:
+            # Debug-Logging einrichten
+            self._setup_debug_logging(args)
+
+            # Umgebung validieren
+            if not self._validate_environment():
+                return 1
+
+            # Readline konfigurieren
+            self._setup_readline()
+
+            # Framework-Flags verarbeiten
+            flags = self._process_flags(args)
+
+            # Framework instanziieren
+            self.logger.debug("Initialisiere Recon-Framework...")
+            framework = base.Recon(**flags)
+
+            # Script ausführen falls angegeben
+            if args.script_file:
+                self.logger.info(f"Führe Script aus: {args.script_file}")
+                framework._do_script_execute(args.script_file)
+
+            # Interaktive Session starten
+            options = [base.Mode.CONSOLE]
+            if args.workspace:
+                options.append(args.workspace)
+                self.logger.info(f"Lade Workspace: {args.workspace}")
+
+            self.logger.debug("Starte interaktive Session...")
+            framework.start(*options)
+
+            return 0
+
+        except KeyboardInterrupt:
+            print(f"\n{Colors.Y}[*] Session interrupted by user{Colors.N}")
+            return 130  # Standard exit code for Ctrl+C
+
+        except Exception as e:
+            print(f"{Colors.R}[!] Fatal error: {e}{Colors.N}")
+            self.logger.exception("Fatal error occurred")
+            return 1
+
+    def main(self) -> int:
+        """
+        Haupteinstiegspunkt der CLI.
+
+        Returns:
+            int: Exit-Code
+        """
+        try:
+            args = self.parser.parse_args()
+            return self.run_framework(args)
+
+        except SystemExit as e:
+            # ArgumentParser ruft sys.exit() bei --help oder --version auf
+            return e.code if e.code is not None else 0
+
+
+def main() -> int:
+    """Hauptfunktion für den CLI-Einstiegspunkt."""
+    cli = ReconCLI()
+    return cli.main()
+
+
+if __name__ == '__main__':
+    exit_code = main()
+    sys.exit(exit_code)

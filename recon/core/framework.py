@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+"""
+CRUCH - Enhanced Leet Speak Wordlist Generator
+A wrapper and subroutine handler for advanced leetspeak wordlist generation
+with crunch-like functionality and improved error handling.
+m4tth4ck
+Original leet.py by Tim Tomes (LaNMaSteR53)
+Enhanced wrapper by: Enhanced Development Team
+"""
+
 from contextlib import closing
 import cmd
 import codecs

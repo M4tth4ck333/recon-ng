@@ -1,89 +1,576 @@
 #!/usr/bin/env python3
+"""
+Recon Framework - Enhanced Command Line Interface
+Main entry point for the Reconnaissance Framework with advanced features
+"""
 
 import argparse
+import os
+import re
 import sys
-# prevent creation of compiled bytecode files
+import logging
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+
+# Prevent creation of compiled bytecode files
 sys.dont_write_bytecode = True
-from recon.core import base
-from recon.core.framework import Colors
 
-def output(string):
-    print(f"{Colors.B}[*]{Colors.N} {string}")
+# Import framework components
+try:
+    from recon.core import base
+    from recon.core.framework import Colors
+except ImportError as e:
+    print(f"[!] Import error: {e}")
+    print("[!] Make sure the recon framework is properly installed.")
+    sys.exit(1)
 
-def recon_cli(args):
-    # process toggle flag arguments
-    flags = {
-        'check': args.check if not args.stealth else False,
-        'analytics': args.analytics if not args.stealth else False,
-        'marketplace': args.marketplace if not args.stealth else False,
-    }
-    # instantiate framework
-    x = base.Recon(**flags)
-    options = [base.Mode.CLI]
-    if args.workspace:
-        options.append(args.workspace)
-    x.start(*options)
-    # set given workspace
-    if args.workspace:
-        x._init_workspace(args.workspace)
-        print(f"WORKSPACE => {args.workspace}")
-    # run given global commands
-    for command in args.global_commands:
-        print(f"GLOBAL COMMAND => {command}")
-        x.onecmd(command)
-    # set given global options
-    for option in args.goptions:
-        param = ' '.join(option.split('='))
-        x._do_options_set(param)
-    # if requested, show global options and exit
-    if args.gshow:
-        x._do_options_list('')
-        return
-    # if requested, show modules and exit
-    if args.show_modules:
-        x._do_modules_search('')
-        return
-    # exit if module not specified
-    if not args.module:
-        output('No module provided.')
-        return
-    # load the module
-    y = x._do_modules_load(args.module)
-    # exit if module not successfully loaded
-    if not y: return
-    print(f"MODULE => {args.module}")
-    # run given module commands
-    for command in args.module_commands:
-        print(f"MODULE COMMAND => {command}")
-        y.onecmd(command)
-    # set given module options
-    for option in args.options:
-        param = ' '.join(option.split('='))
-        y._do_options_set(param)
-    # if requested, show module options and exit
-    if args.show:
-        y._do_options_list('')
-        return
-    if args.run:
-        # run the module
-        y.do_run(None)
 
-description = f"%(prog)s - {base.__author__}"
-parser = argparse.ArgumentParser(description=description)
-parser.add_argument('-w', help='load/create a workspace', metavar='workspace', dest='workspace', action='store')
-parser.add_argument('-C', help='runs a command at the global context', metavar='command', dest='global_commands' ,default=[], action='append')
-parser.add_argument('-c', help='runs a command at the module context (pre-run)', metavar='command', dest='module_commands' ,default=[], action='append')
-parser.add_argument('-G', help='show available global options', dest='gshow', default=False, action='store_true')
-parser.add_argument('-g', help='set a global option (can be used more than once)', metavar='name=value', dest='goptions', default=[], action='append')
-parser.add_argument('-M', help='show modules', dest='show_modules', default=False, action='store_true')
-parser.add_argument('-m', help='specify the module', metavar='module', dest='module', action='store')
-parser.add_argument('-O', help='show available module options', dest='show', default=False, action='store_true')
-parser.add_argument('-o', help='set a module option (can be used more than once)', metavar='name=value', dest='options', default=[], action='append')
-parser.add_argument('-x', help='run the module', dest='run', default=False, action='store_true')
-parser.add_argument('--no-version', help='disable version check', dest='check', default=True, action='store_false')
-parser.add_argument('--no-analytics', help='disable analytics reporting', dest='analytics', default=True, action='store_false')
-parser.add_argument('--no-marketplace', help='disable remote module management', dest='marketplace', default=True, action='store_false')
-parser.add_argument('--stealth', help='disable all passive requests (--no-*)', dest='stealth', default=False, action='store_true')
-parser.add_argument('--version', help='displays the current version', action='version', version=base.__version__)
-args = parser.parse_args()
-recon_cli(args)
+class ReconCLI:
+    """
+    Enhanced Command Line Interface for the Recon Framework.
+    Manages argument parsing, setup, and framework initialization with advanced features.
+    """
+
+    def __init__(self):
+        self.logger = self._setup_logging()
+        self.parser = self._create_argument_parser()
+
+    def _setup_logging(self) -> logging.Logger:
+        """Configure logging for the CLI."""
+        logger = logging.getLogger('recon-cli')
+
+        # Logging level based on environment variable
+        log_level = os.getenv('RECON_LOG_LEVEL', 'WARNING').upper()
+        logger.setLevel(getattr(logging, log_level, logging.WARNING))
+
+        # Add handler only if none exists
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
+        return logger
+
+    def _setup_readline(self) -> bool:
+        """
+        Configure tab completion with readline.
+
+        Returns:
+            bool: True if readline successfully configured, False otherwise
+        """
+        try:
+            import readline
+            import rlcompleter
+
+            # Platform-specific configuration
+            if 'libedit' in readline.__doc__:
+                readline.parse_and_bind('bind ^I rl_complete')
+            else:
+                readline.parse_and_bind('tab: complete')
+
+            # Adjust delimiters for better completion
+            current_delims = readline.get_completer_delims()
+            new_delims = re.sub('[/-]', '', current_delims)
+            readline.set_completer_delims(new_delims)
+
+            # Configure history file
+            self._setup_history_file()
+
+            self.logger.debug("Readline successfully configured")
+            return True
+
+        except ImportError:
+            print(f"{Colors.R}[!] Module 'readline' not available. "
+                  f"Tab complete disabled.{Colors.N}")
+            self.logger.warning("Readline not available")
+            return False
+
+    def _setup_history_file(self) -> None:
+        """Configure readline history file."""
+        try:
+            import readline
+
+            # History file in home directory or tmp
+            history_file = Path.home() / '.recon_history'
+            if not history_file.parent.exists():
+                history_file = Path('/tmp') / '.recon_history'
+
+            # Load history if it exists
+            if history_file.exists():
+                readline.read_history_file(str(history_file))
+
+            # Save history on exit
+            import atexit
+            atexit.register(readline.write_history_file, str(history_file))
+
+            # Maximum history size
+            readline.set_history_length(1000)
+
+            self.logger.debug(f"History file configured: {history_file}")
+
+        except Exception as e:
+            self.logger.debug(f"Error setting up history: {e}")
+
+    def _create_argument_parser(self) -> argparse.ArgumentParser:
+        """Create and configure the argument parser."""
+        description = f"%(prog)s - {base.__author__}"
+
+        parser = argparse.ArgumentParser(
+            description=description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=self._get_epilog_text()
+        )
+
+        # Workspace options
+        workspace_group = parser.add_argument_group('Workspace Options')
+        workspace_group.add_argument(
+            '-w', '--workspace',
+            help='load/create a workspace',
+            metavar='WORKSPACE',
+            dest='workspace',
+            action='store'
+        )
+
+        # Command execution options
+        command_group = parser.add_argument_group('Command Options')
+        command_group.add_argument(
+            '-C', '--global-command',
+            help='runs a command at the global context',
+            metavar='COMMAND',
+            dest='global_commands',
+            default=[],
+            action='append'
+        )
+        command_group.add_argument(
+            '-c', '--module-command',
+            help='runs a command at the module context (pre-run)',
+            metavar='COMMAND',
+            dest='module_commands',
+            default=[],
+            action='append'
+        )
+
+        # Global options
+        global_group = parser.add_argument_group('Global Options')
+        global_group.add_argument(
+            '-G', '--show-global-options',
+            help='show available global options',
+            dest='gshow',
+            default=False,
+            action='store_true'
+        )
+        global_group.add_argument(
+            '-g', '--global-option',
+            help='set a global option (can be used multiple times)',
+            metavar='NAME=VALUE',
+            dest='goptions',
+            default=[],
+            action='append'
+        )
+
+        # Module options
+        module_group = parser.add_argument_group('Module Options')
+        module_group.add_argument(
+            '-M', '--show-modules',
+            help='show available modules',
+            dest='show_modules',
+            default=False,
+            action='store_true'
+        )
+        module_group.add_argument(
+            '-m', '--module',
+            help='specify the module to load',
+            metavar='MODULE',
+            dest='module',
+            action='store'
+        )
+        module_group.add_argument(
+            '-O', '--show-module-options',
+            help='show available module options',
+            dest='show',
+            default=False,
+            action='store_true'
+        )
+        module_group.add_argument(
+            '-o', '--module-option',
+            help='set a module option (can be used multiple times)',
+            metavar='NAME=VALUE',
+            dest='options',
+            default=[],
+            action='append'
+        )
+        module_group.add_argument(
+            '-x', '--run',
+            help='run the module',
+            dest='run',
+            default=False,
+            action='store_true'
+        )
+
+        # Script options
+        script_group = parser.add_argument_group('Script Options')
+        script_group.add_argument(
+            '-r', '--resource',
+            help='load commands from a resource file',
+            metavar='FILENAME',
+            dest='script_file',
+            action='store',
+            type=self._validate_script_file
+        )
+
+        # Feature toggle options
+        feature_group = parser.add_argument_group('Feature Options')
+        feature_group.add_argument(
+            '--no-version',
+            help='disable version check',
+            dest='check',
+            default=True,
+            action='store_false'
+        )
+        feature_group.add_argument(
+            '--no-analytics',
+            help='disable analytics reporting',
+            dest='analytics',
+            default=True,
+            action='store_false'
+        )
+        feature_group.add_argument(
+            '--no-marketplace',
+            help='disable remote module management',
+            dest='marketplace',
+            default=True,
+            action='store_false'
+        )
+        feature_group.add_argument(
+            '--stealth',
+            help='disable all passive requests (implies --no-*)',
+            dest='stealth',
+            default=False,
+            action='store_true'
+        )
+
+        # UI options
+        ui_group = parser.add_argument_group('UI Options')
+        ui_group.add_argument(
+            '--accessible',
+            help='use accessible outputs when available',
+            dest='accessible',
+            default=False,
+            action='store_true'
+        )
+        ui_group.add_argument(
+            '--no-colors',
+            help='disable colored output',
+            dest='colors',
+            default=True,
+            action='store_false'
+        )
+
+        # Debug options
+        debug_group = parser.add_argument_group('Debug Options')
+        debug_group.add_argument(
+            '--debug',
+            help='enable debug output',
+            dest='debug',
+            default=False,
+            action='store_true'
+        )
+        debug_group.add_argument(
+            '--log-file',
+            help='write logs to file',
+            metavar='LOGFILE',
+            dest='log_file',
+            action='store'
+        )
+
+        # Version
+        parser.add_argument(
+            '--version',
+            help='displays the current version',
+            action='version',
+            version=f'%(prog)s {base.__version__}'
+        )
+
+        return parser
+
+    def _get_epilog_text(self) -> str:
+        """Return epilog text for help."""
+        return """
+Examples:
+  %(prog)s                                    # Start interactive session
+  %(prog)s -w myproject                       # Load/create workspace 'myproject'
+  %(prog)s -m recon/domains-hosts/brute_hosts # Load specific module
+  %(prog)s -m recon/domains-hosts/brute_hosts -o SOURCE=example.com -x
+                                              # Load module, set option, and run
+  %(prog)s -C "workspaces list" -G            # Run global command and show options
+  %(prog)s -r commands.txt                    # Execute commands from file
+  %(prog)s --stealth                          # Run in stealth mode
+  %(prog)s --debug --log-file debug.log       # Debug mode with logging
+
+Environment Variables:
+  RECON_LOG_LEVEL    Set logging level (DEBUG, INFO, WARNING, ERROR)
+  RECON_CONFIG_DIR   Custom configuration directory
+        """
+
+    def _validate_script_file(self, filepath: str) -> str:
+        """
+        Validate script file path.
+
+        Args:
+            filepath: Path to script file
+
+        Returns:
+            str: Validated file path
+
+        Raises:
+            argparse.ArgumentTypeError: For invalid files
+        """
+        path = Path(filepath)
+
+        if not path.exists():
+            raise argparse.ArgumentTypeError(f"Script file '{filepath}' does not exist")
+
+        if not path.is_file():
+            raise argparse.ArgumentTypeError(f"'{filepath}' is not a file")
+
+        if not path.stat().st_size:
+            raise argparse.ArgumentTypeError(f"Script file '{filepath}' is empty")
+
+        return str(path.resolve())
+
+    def _process_flags(self, args: argparse.Namespace) -> Dict[str, Any]:
+        """
+        Process command-line flags to framework options.
+
+        Args:
+            args: Parsed command-line arguments
+
+        Returns:
+            Dict: Framework configuration
+        """
+        # Stealth mode overrides other options
+        if args.stealth:
+            return {
+                'check': False,
+                'analytics': False,
+                'marketplace': False,
+                'accessible': args.accessible,
+                'colors': args.colors,
+                'debug': args.debug
+            }
+
+        return {
+            'check': args.check,
+            'analytics': args.analytics,
+            'marketplace': args.marketplace,
+            'accessible': args.accessible,
+            'colors': args.colors,
+            'debug': args.debug
+        }
+
+    def _setup_debug_logging(self, args: argparse.Namespace) -> None:
+        """Configure debug logging based on arguments."""
+        if args.debug:
+            self.logger.setLevel(logging.DEBUG)
+
+            # Configure log file if specified
+            if args.log_file:
+                try:
+                    file_handler = logging.FileHandler(args.log_file)
+                    file_formatter = logging.Formatter(
+                        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+                    )
+                    file_handler.setFormatter(file_formatter)
+                    self.logger.addHandler(file_handler)
+
+                    print(f"[*] Debug logging enabled. Writing to: {args.log_file}")
+                except Exception as e:
+                    print(f"{Colors.R}[!] Could not setup log file: {e}{Colors.N}")
+
+    def _validate_environment(self) -> bool:
+        """
+        Validate environment before startup.
+
+        Returns:
+            bool: True if environment is valid, False otherwise
+        """
+        try:
+            # Test framework modules
+            _ = base.Recon
+
+            # Check Python version
+            if sys.version_info < (3, 6):
+                print(f"{Colors.R}[!] Python 3.6+ required. "
+                      f"Current version: {sys.version}{Colors.N}")
+                return False
+
+            # Check permissions if required
+            if hasattr(base, 'REQUIRES_ADMIN') and base.REQUIRES_ADMIN:
+                if os.geteuid() != 0:
+                    print(f"{Colors.R}[!] This tool requires administrative privileges{Colors.N}")
+                    return False
+
+            return True
+
+        except Exception as e:
+            print(f"{Colors.R}[!] Environment validation failed: {e}{Colors.N}")
+            return False
+
+    def output(self, string: str) -> None:
+        """Output formatted message."""
+        print(f"{Colors.B}[*]{Colors.N} {string}")
+
+    def run_framework(self, args: argparse.Namespace) -> int:
+        """
+        Start the Recon framework with given arguments.
+
+        Args:
+            args: Parsed command-line arguments
+
+        Returns:
+            int: Exit code (0 = success, != 0 = error)
+        """
+        try:
+            # Setup debug logging
+            self._setup_debug_logging(args)
+
+            # Validate environment
+            if not self._validate_environment():
+                return 1
+
+            # Configure readline
+            self._setup_readline()
+
+            # Process framework flags
+            flags = self._process_flags(args)
+
+            # Apply color settings
+            if not flags.get('colors', True):
+                Colors.disable()
+
+            # Instantiate framework
+            self.logger.debug("Initializing Recon framework...")
+            x = base.Recon(**flags)
+
+            # Determine startup options
+            options = [base.Mode.CLI]
+            if args.workspace:
+                options.append(args.workspace)
+
+            # Start framework
+            x.start(*options)
+
+            # Set workspace if provided
+            if args.workspace:
+                x._init_workspace(args.workspace)
+                print(f"WORKSPACE => {args.workspace}")
+
+            # Execute resource file if provided
+            if args.script_file:
+                self.logger.info(f"Executing script: {args.script_file}")
+                try:
+                    with open(args.script_file, 'r') as f:
+                        commands = f.readlines()
+
+                    for line_num, command in enumerate(commands, 1):
+                        command = command.strip()
+                        if command and not command.startswith('#'):
+                            print(f"SCRIPT [{line_num}] => {command}")
+                            x.onecmd(command)
+                except Exception as e:
+                    print(f"{Colors.R}[!] Error executing script: {e}{Colors.N}")
+                    return 1
+
+            # Run global commands
+            for command in args.global_commands:
+                print(f"GLOBAL COMMAND => {command}")
+                x.onecmd(command)
+
+            # Set global options
+            for option in args.goptions:
+                param = ' '.join(option.split('='))
+                x._do_options_set(param)
+
+            # Show global options and exit if requested
+            if args.gshow:
+                x._do_options_list('')
+                return 0
+
+            # Show modules and exit if requested
+            if args.show_modules:
+                x._do_modules_search('')
+                return 0
+
+            # Handle module-specific operations
+            if args.module:
+                # Load the module
+                y = x._do_modules_load(args.module)
+                if not y:
+                    self.output('Module loading failed.')
+                    return 1
+
+                print(f"MODULE => {args.module}")
+
+                # Run module commands
+                for command in args.module_commands:
+                    print(f"MODULE COMMAND => {command}")
+                    y.onecmd(command)
+
+                # Set module options
+                for option in args.options:
+                    param = ' '.join(option.split('='))
+                    y._do_options_set(param)
+
+                # Show module options and exit if requested
+                if args.show:
+                    y._do_options_list('')
+                    return 0
+
+                # Run the module if requested
+                if args.run:
+                    y.do_run(None)
+
+            elif not any([args.gshow, args.show_modules, args.script_file, args.global_commands]):
+                # No specific actions requested, provide helpful message
+                if not args.workspace:
+                    self.output('Started interactive session. Type "help" for available commands.')
+
+            return 0
+
+        except KeyboardInterrupt:
+            print(f"\n{Colors.Y}[*] Session interrupted by user{Colors.N}")
+            return 130  # Standard exit code for Ctrl+C
+
+        except Exception as e:
+            print(f"{Colors.R}[!] Fatal error: {e}{Colors.N}")
+            self.logger.exception("Fatal error occurred")
+            return 1
+
+    def main(self) -> int:
+        """
+        Main entry point for the CLI.
+
+        Returns:
+            int: Exit code
+        """
+        try:
+            args = self.parser.parse_args()
+            return self.run_framework(args)
+
+        except SystemExit as e:
+            # ArgumentParser calls sys.exit() for --help or --version
+            return e.code if e.code is not None else 0
+
+
+def main() -> int:
+    """Main function for CLI entry point."""
+    cli = ReconCLI()
+    return cli.main()
+
+
+if __name__ == '__main__':
+    exit_code = main()
+    sys.exit(exit_code)
