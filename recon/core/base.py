@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+"""
+recon-ng/recon/core/farmework.py
+m4tth4ck
+Original leet.py by Tim Tomes (LaNMaSteR53)
+Enhanced wrapper by: Enhanced Development Team
+"""
 from pathlib import Path
 import re
 import sys
